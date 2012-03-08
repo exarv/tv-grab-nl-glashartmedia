@@ -2,7 +2,8 @@
 <?php
 /* tv_grab_nl_glashartmedia
  *
- * @Author
+ * @author Robert Verspuy <robert@exa.nl>
+ * @version 0.6
  *
  */
 ini_set('date.timezone', 'Europe/Amsterdam');
@@ -350,6 +351,9 @@ function dolog($level,$msg) {
 	}
 }
 
+/* gzdecode function
+ * Taken from the comments of http://php.net/manual/en/function.gzdecode.php
+ */
 function gzdecode($data) {
   $len = strlen($data);
   if ($len < 18 || strcmp(substr($data,0,2),"\x1f\x8b")) {
