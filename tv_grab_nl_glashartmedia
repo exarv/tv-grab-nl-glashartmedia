@@ -511,8 +511,6 @@ function load_config() {
 function save_config() {
 	global $s;
 
-	print_r($s);
-
 	$conf = '';
 	$confchannels = '';
 	if (isset($s['config'])) {
