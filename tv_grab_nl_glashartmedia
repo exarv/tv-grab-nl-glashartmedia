@@ -1,0 +1,653 @@
+#!/usr/bin/php
+<?php
+/* tv_grab_nl_glashartmedia
+ *
+ * @Author
+ *
+ */
+ini_set('date.timezone', 'Europe/Amsterdam');
+ini_set('memory_limit','256M');
+
+$s['appname'] = 'tv_grab_nl_glashartmedia';
+$s['version'] = '0.6';
+$s['appurl'] = 'http://www.exarv.nl/tv_grab_nl_glashartmedia';
+$s['epgurl'] = 'http://w.zt6.nl';
+$s['epgdescription'] = 'Glashart Media TV Guide';
+$s['cachedir'] = dirname($argv[0]).'/cache/';
+
+define('L_ERR',1);
+define('L_WAR',2);
+define('L_NFO',3);
+define('L_VBS',4);
+define('L_DBG',5);
+
+# -- Commandline Options
+$debuglevel		= get_arg_value(	'debuglevel',	3,					'/^[0-9]+$/');
+$show_help 		= get_arg_flag(		'help');
+$show_description 	= get_arg_flag(		'description');
+$show_capabilities 	= get_arg_flag(		'capabilities');
+$show_preferredmethod	= get_arg_flag(		'preferredmethod');
+$do_configure		= get_arg_flag(		'configure');
+$set_quiet 		= get_arg_flag(		'quiet');
+$set_verbose 		= get_arg_flag(		'verbose');
+$s['nocacheepg']	= get_arg_flag(		'nocacheepg');
+$s['progress']		= get_arg_flag(		'progress');
+$s['nodetails']		= get_arg_flag(		'nodetails');
+$s['output'] 		= get_arg_value(	'output',	'--');
+$s['days'] 		= get_arg_value(	'days',		7,					'/^[0-9]+$/');
+$s['offset'] 		= get_arg_value(	'offset',	0,					'/^[0-9]+$/');
+$s['sleep'] 		= (get_arg_value(	'sleep',	0.5,					'/^[0-9]+(\.[0-9]+)?$/')*1000);
+$s['sleep2'] 		= (get_arg_value(	'sleep2',	0.2,					'/^[0-9]+(\.[0-9]+)?$/')*1000);
+$s['suffix'] 		= get_arg_value(	'suffix',	'glashart',				'/^[-\._@a-zA-Z0-9]+$/');
+$s['useragent'] 	= get_arg_value(	'useragent',	$s['appname'].' v'.$s['version']);
+$s['validcache'] 	= get_arg_value(	'validcache',	36,					'/^[0-9]+$/');
+$s['config-file']	= get_arg_value(	'config-file',	$_SERVER['HOME'].'/.xmltv/'.$s['appname'].'.conf');
+# -- Commandline Options
+
+if ($set_quiet) {
+	$debuglevel = L_WAR;
+}
+
+if ($set_verbose) {
+	if ($debuglevel < L_VBS) {
+		$debuglevel = L_VBS;
+	}
+}
+
+if ($show_help) {
+	usage(0);
+}
+if ($show_description) {
+	show_description();
+}
+if ($show_capabilities) {
+	show_capabilities();
+}
+if ($show_preferredmethod) {
+	show_preferredmethod();
+}
+
+load_config();
+
+if ($do_configure) {
+	do_configure();
+}
+
+if (isset($argv[1])) {
+	dolog(L_ERR, 'Unknown argument '.$argv[1]);
+	usage();
+}
+
+main();
+
+function main() {
+	global $epg, $s, $ch;
+
+	$epg = array();
+	$today = strftime('%Y%m%d');
+	$max = ($s['days']*8);
+	for ($curday=0; $curday<$s['days']; $curday++) {
+		$curdate = strftime('%Y%m%d',strtotime('+'.($curday+$s['offset']).' days',strtotime($today)));
+		for ($i=0; $i<8; $i++) {
+			$url = $s['epgurl'].'/epgdata/epgdata.'.$curdate.'.'.$i.'.json.gz';
+			$gzcontent = retrieve_url($url, 'epgdata', $curdate.$i, $s['nocacheepg']);
+			if ($s['progress']==true) {
+				$progress = ($curday * 8) + $i;
+				dolog(L_NFO,"Progress: ".sprintf('%.1f',($progress / $max)*100)."%");
+			}
+			if ($gzcontent == false) {
+				dolog(L_ERR,'Error while retrieving '.$url.' : '.curl_error($ch));
+			} else {
+				$json = gzdecode($gzcontent);
+				decode_epg($json, $curdate);
+			}
+		}
+	}
+	if ($s['progress']==true) {
+		dolog(L_NFO,"Progress: 99.9%");
+	}
+
+	output_epg($epg);
+	if ($s['progress']==true) {
+		dolog(L_NFO,"Progress: 100.0%");
+	}
+}
+
+function retrieve_url($url,$subdir,$prefix,$nocache = false) {
+	global $s,$ch;
+
+	$md5=md5($url);
+	if (!file_exists($s['cachedir'].$subdir)) {
+		mkdir($s['cachedir'].$subdir,0770,true);
+	}
+	$filename = $s['cachedir'].$subdir.'/'.$prefix.'_'.$md5.'.cache';
+	if (($nocache == false) && (file_exists($filename))) {
+		$cachedresponse = file_get_contents($filename);
+	} else {
+		$cachedresponse = '';
+	}
+	if ($cachedresponse != '') {
+		$lastmodified = filemtime($filename);
+		if ((time() - $lastmodified) > (60 * 60 * $s['validcache'])) {
+			$ch = curl_init($url);
+			curl_setopt($ch, CURLOPT_USERAGENT, $s['useragent']);
+			curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+			curl_setopt($ch, CURLOPT_BINARYTRANSFER, true);
+			curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+			curl_setopt($ch, CURLOPT_CONNECTTIMEOUT ,5);
+			curl_setopt($ch, CURLOPT_TIMECONDITION, CURL_TIMECOND_IFMODSINCE);
+			curl_setopt($ch, CURLOPT_TIMEVALUE, $lastmodified);
+			$response = curl_exec($ch);
+			$status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+			if ($status == 404) {
+				dolog(L_WAR,'Url '.$url.' returned 404 Not Found');
+				dolog(L_VBS,'Loading '.$url.' (Not Found) from cache: '.$filename);
+				$response = $cachedresponse;
+				dolog(L_DBG,'Sleeping for '.$s['sleep2'].' ms');
+				usleep($s['sleep2'] * 1000);
+			} elseif ($status == 304) {
+				dolog(L_VBS,'Loading '.$url.' (Not Modified) from cache: '.$filename);
+				$response = $cachedresponse;
+				dolog(L_DBG,'Sleeping for '.$s['sleep2'].' ms');
+				usleep($s['sleep2'] * 1000);
+			} else {
+				dolog(L_VBS,'Retrieving '.$url.' (Modified)');
+				file_put_contents($filename, $response);
+				dolog(L_DBG,'Sleeping for '.$s['sleep'].' ms');
+				usleep($s['sleep'] * 1000);
+			}
+			
+		} else {
+			dolog(L_VBS,'Loading '.$url.' from cache: '.$filename);
+			$response = $cachedresponse;
+		}
+	} else {
+		$ch = curl_init($url);
+		curl_setopt($ch, CURLOPT_USERAGENT, $s['useragent']);
+		curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+		curl_setopt($ch, CURLOPT_BINARYTRANSFER, true);
+		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+		curl_setopt($ch, CURLOPT_CONNECTTIMEOUT,5);
+		dolog(L_VBS,'Retrieving '.$url);
+		$response = curl_exec($ch);
+		$status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+		if ($status == 404) {
+			$response = '';
+			dolog(L_WAR,'Url '.$url.' returned 404 Not Found');
+			dolog(L_DBG,'Sleeping for '.$s['sleep'].' ms');
+			usleep($s['sleep'] * 1000);
+		} else {
+			file_put_contents($filename, $response);
+			dolog(L_DBG,'Sleeping for '.$s['sleep'].' ms');
+			usleep($s['sleep'] * 1000);
+		}
+	}
+	return $response;
+}
+
+function output_epg($epg) {
+	global $s;
+
+/* Possible values in proginfo
+ * id => arrowclassicrock-001002CD00000300
+ * name => Zender uit de ether
+ * start => 1315627200
+ * end => 1315717200
+ * description => Deze zender is momenteel uit de ether. De uitzendingen beginnen opnieuw om 7:00 op zondag
+ * channel => arrowclassicrock
+ * episodeTitle => 
+ * genres => Array
+ * aspectratio => 16:9
+ * actors => Array
+ * directors => Array
+ * presenters => Array
+ * nicamParentalRating => 16
+ * nicamWarning => 36
+ * commentators => Array
+ */
+
+	$xml = '';
+	$xml .= '<?xml version="1.0"'.'?'.'>'."\n";
+	$xml .= '<!DOCTYPE tv SYSTEM "xmltv.dtd">'."\n";
+	$xml .= '<tv generator-info-url="'.$s['appurl'].'" source-info-url="'.$s['epgurl'].'" source-info-name="'.$s['epgdescription'].'" generator-info-name="'.$s['appname'].' v'.$s['version'].'">'."\n";
+
+	foreach ($epg as $chanid=>$chanepg) {
+		$xml .= '  <channel id="'.$chanid.'.'.$s['suffix'].'">'."\n";
+		$xml .= '    <display-name lang="nl">'.$chanid.'</display-name>'."\n";
+		$xml .= '    <icon src="'.$s['epgurl'].'/tvmenu/images/channelsthumb/'.$chanid.'.png" />'."\n";
+		$xml .= '  </channel>'."\n";
+		foreach ($chanepg as $progid=>$proginfo) {
+			if (isset($proginfo['name'])) {
+				$xml .= '  <programme start="'.strftime('%Y%m%d%H%M%S %z',$proginfo['start']).'" end="'.strftime('%Y%m%d%H%M%S %z',$proginfo['end']).'" channel="'.$chanid.'.'.$s['suffix'].'">'."\n";
+				$xml .= '    <title lang="nl">'.myhtmlentities($proginfo['name']).'</title>'."\n";
+				if ((isset($proginfo['description'])) && ($proginfo['description']!='')) {
+					$xml .= '    <desc lang="nl">'.myhtmlentities($proginfo['description']).'</desc>'."\n";
+				}
+				if ((isset($proginfo['episodeTitle'])) && ($proginfo['episodeTitle']!='')) {
+					$xml .= '    <sub-title lang="nl">'.myhtmlentities($proginfo['episodeTitle']).'</sub-title>'."\n";
+				}
+				if ((isset($proginfo['genres'])) && (is_array($proginfo['genres']))) {
+					foreach($proginfo['genres'] as $k=>$v) { 
+						$xml .= '    <category lang="nl">'.myhtmlentities($v).'</category>'."\n";
+					}
+				}
+				if ((isset($proginfo['aspectratio'])) && ($proginfo['aspectratio']!='')) {
+					$xml .= '    <video>'."\n";
+					$xml .= '      <aspect>'.$proginfo['aspectratio'].'</aspect>'."\n";
+					$xml .= '    </video>'."\n";
+				}
+				if ((isset($proginfo['nicamParentalRating'])) && ($proginfo['nicamParentalRating']!='')) {
+					$xml .= '    <rating system="nicam">'."\n";
+					$xml .= '      <value>'.$proginfo['nicamParentalRating'].'</value>'."\n";
+					$xml .= '    </rating>'."\n";
+				}
+				$xmlcredits = '';
+				if (isset($proginfo['directors'])) {
+					foreach($proginfo['directors'] as $k=>$v) { 
+						$xmlcredits .= '    <director>'.myhtmlentities($v).'</director>'."\n";
+					}
+				}
+				if (isset($proginfo['actors'])) {
+					foreach($proginfo['actors'] as $k=>$v) { 
+						$xmlcredits .= '    <actor>'.myhtmlentities($v).'</actor>'."\n";
+					}
+				}
+				if (isset($proginfo['presenters'])) {
+					foreach($proginfo['presenters'] as $k=>$v) { 
+						$xmlcredits .= '    <presenter>'.myhtmlentities($v).'</presenter>'."\n";
+					}
+				}
+				if (isset($proginfo['commentators'])) {
+					foreach($proginfo['commentators'] as $k=>$v) {
+						$xmlcredits .= '    <commentator>'.myhtmlentities($v).'</commentator>'."\n";
+					}
+				}
+				if ($xmlcredits!='') {
+					$xml .= '    <credits>'."\n".$xmlcredits.'    </credits>'."\n";
+				}
+			
+				$xml .= '  </programme>'."\n";
+			}
+		}
+	}
+
+	$xml .= '</tv>';
+
+	if (strcmp($s['output'],'--')==0) {
+		print $xml;
+	} else {
+		file_put_contents($s['output'],$xml);
+	}
+}
+
+function decode_epg($json, $curdate) {
+	global $epg, $s, $ch;
+
+	$rangestart = strtotime($curdate);
+	$rangeend = strtotime('+1 day', $rangestart);
+
+	$epgpartial = json_decode($json, true);
+
+	foreach ($epgpartial as $chanid=>$chanepg) {
+		foreach ($chanepg as $progid=>$proginfo) {
+			if (($proginfo['start'] >= $rangestart) && ($proginfo['start'] < $rangeend) && ($proginfo['end']>$rangestart)) {
+				if (isset($s['config']['channel'][$chanid])) {
+					$action = $s['config']['channel'][$chanid];
+				} else {
+					$action = 'y';
+				}
+				if (($s['nodetails']==false) && (strcmp($action,'d')==0)) {
+					$url = $s['epgurl'].'/epgdata/'.substr($proginfo['id'],-2).'/'.$proginfo['id'].'.json';
+					$json = retrieve_url($url, $chanid, $proginfo['id'], false);
+					if (strcmp($json,'')==0) {
+						dolog(L_ERR,'Error while retrieving '.$url.' : '.curl_error($ch));
+					} else {
+						$tmp = json_decode($json, true);
+						foreach ($tmp as $k=>$v) {
+							$proginfo[$k] = $v;
+						}
+					}
+				}
+				if (in_array($action, array('y','d'))) {
+					if (isset($epg[$chanid][$proginfo['start']])) {
+						if (isset($epg[$chanid][$proginfo['start']]['name'])) {
+							if (strcmp($epg[$chanid][$proginfo['start']]['name'],'Geen programmagegevens beschikbaar.')==0) {
+								$epg[$chanid][$proginfo['start']] = $proginfo;
+								dolog(L_DBG, "Double program on ".$chanid." @ ".strftime('%F %T', $proginfo['start']).". Overwriting previous (previous contained no info)");
+							} elseif (strcmp($proginfo['name'],'Geen programmagegevens beschikbaar.')==0) {
+								dolog(L_DBG, "Double program on ".$chanid." @ ".strftime('%F %T', $proginfo['start']).". Not overwriting previous (current contains no info)");
+							} elseif ($epg[$chanid][$proginfo['start']] != $proginfo) {
+								dolog(L_WAR, "Double program on ".$chanid." @ ".strftime('%F %T', $proginfo['start']).". Prev: ".$epg[$chanid][$proginfo['start']]['name'].". Cur: ".$proginfo['name'].". Overwriting previous.");
+								$epg[$chanid][$proginfo['start']] = $proginfo;
+							}
+						}
+					} else {
+						$epg[$chanid][$proginfo['start']] = $proginfo;
+					}
+				}
+			}
+		}
+	}
+}
+
+function dolog($level,$msg) {
+	global $debuglevel,$erroroutput;
+
+	if (!isset($erroroutput)) {
+		$erroroutput = fopen('php://stderr', 'w');
+	}
+
+	$levelname = array(
+		L_ERR => '[ERR]',
+		L_WAR => '[WAR]',
+		L_NFO => '[NFO]',
+		L_VBS => '[VBS]',
+		L_DBG => '[DBG]',
+	);
+
+	if ($level <= $debuglevel) {
+		fwrite($erroroutput, strftime('%Y %T').' '.$levelname[$level].' '.$msg."\n");
+	}
+}
+
+function gzdecode($data) {
+  $len = strlen($data);
+  if ($len < 18 || strcmp(substr($data,0,2),"\x1f\x8b")) {
+    return null;  // Not GZIP format (See RFC 1952)
+  }
+  $method = ord(substr($data,2,1));  // Compression method
+  $flags  = ord(substr($data,3,1));  // Flags
+  if ($flags & 31 != $flags) {
+    // Reserved bits are set -- NOT ALLOWED by RFC 1952
+    return null;
+  }
+  // NOTE: $mtime may be negative (PHP integer limitations)
+  $mtime = unpack("V", substr($data,4,4));
+  $mtime = $mtime[1];
+  $xfl   = substr($data,8,1);
+  $os    = substr($data,8,1);
+  $headerlen = 10;
+  $extralen  = 0;
+  $extra     = "";
+  if ($flags & 4) {
+    // 2-byte length prefixed EXTRA data in header
+    if ($len - $headerlen - 2 < 8) {
+      return false;    // Invalid format
+    }
+    $extralen = unpack("v",substr($data,8,2));
+    $extralen = $extralen[1];
+    if ($len - $headerlen - 2 - $extralen < 8) {
+      return false;    // Invalid format
+    }
+    $extra = substr($data,10,$extralen);
+    $headerlen += 2 + $extralen;
+  }
+
+  $filenamelen = 0;
+  $filename = "";
+  if ($flags & 8) {
+    // C-style string file NAME data in header
+    if ($len - $headerlen - 1 < 8) {
+      return false;    // Invalid format
+    }
+    $filenamelen = strpos(substr($data,8+$extralen),chr(0));
+    if ($filenamelen === false || $len - $headerlen - $filenamelen - 1 < 8) {
+      return false;    // Invalid format
+    }
+    $filename = substr($data,$headerlen,$filenamelen);
+    $headerlen += $filenamelen + 1;
+  }
+
+  $commentlen = 0;
+  $comment = "";
+  if ($flags & 16) {
+    // C-style string COMMENT data in header
+    if ($len - $headerlen - 1 < 8) {
+      return false;    // Invalid format
+    }
+    $commentlen = strpos(substr($data,8+$extralen+$filenamelen),chr(0));
+    if ($commentlen === false || $len - $headerlen - $commentlen - 1 < 8) {
+      return false;    // Invalid header format
+    }
+    $comment = substr($data,$headerlen,$commentlen);
+    $headerlen += $commentlen + 1;
+  }
+
+  $headercrc = "";
+  if ($flags & 1) {
+    // 2-bytes (lowest order) of CRC32 on header present
+    if ($len - $headerlen - 2 < 8) {
+      return false;    // Invalid format
+    }
+    $calccrc = crc32(substr($data,0,$headerlen)) & 0xffff;
+    $headercrc = unpack("v", substr($data,$headerlen,2));
+    $headercrc = $headercrc[1];
+    if ($headercrc != $calccrc) {
+      return false;    // Bad header CRC
+    }
+    $headerlen += 2;
+  }
+
+  // GZIP FOOTER - These be negative due to PHP's limitations
+  $datacrc = unpack("V",substr($data,-8,4));
+  $datacrc = $datacrc[1];
+  $isize = unpack("V",substr($data,-4));
+  $isize = $isize[1];
+
+  // Perform the decompression:
+  $bodylen = $len-$headerlen-8;
+  if ($bodylen < 1) {
+    // This should never happen - IMPLEMENTATION BUG!
+    return null;
+  }
+  $body = substr($data,$headerlen,$bodylen);
+  $data = "";
+  if ($bodylen > 0) {
+    switch ($method) {
+      case 8:
+        // Currently the only supported compression method:
+        $data = gzinflate($body);
+        break;
+      default:
+        // Unknown compression method
+        return false;
+    }
+  } else {
+    // I'm not sure if zero-byte body content is allowed.
+    // Allow it for now...  Do nothing...
+  }
+
+  // Verifiy decompressed size and CRC32:
+  // NOTE: This may fail with large data sizes depending on how
+  //       PHP's integer limitations affect strlen() since $isize
+  //       may be negative for large sizes.
+  if ($isize != strlen($data) || crc32($data) != $datacrc) {
+    // Bad format!  Length or CRC doesn't match!
+    return false;
+  }
+  return $data;
+}
+
+function show_description() {
+	global $s;
+	print "Netherlands (".$s['epgdescription'].")\n";
+	exit(0);
+}
+
+function show_capabilities() {
+	print "baseline\n";
+	print "manualconfig\n";
+	print "preferredmethod\n";
+	exit (0);
+}
+
+function show_preferredmethod() {
+	print "allatonce\n";
+	exit (0);
+}
+
+function load_config() {
+	global $s;
+
+	if (file_exists($s['config-file'])) {
+		$conf = file_get_contents($s['config-file']);
+		$lines = explode("\n",$conf);
+		foreach ($lines as $line) {
+			if (preg_match('/^(channel )?([-_a-zA-Z0-9]+)\s*=\s*([-_a-zA-Z0-9]+)$/', trim($line), $match)) {
+				if (strcmp($match[1],'channel ')==0) {
+					$s['config']['channel'][$match[2]]=$match[3];
+				} else {
+					$s['config'][$match[2]]=$match[3];
+				}
+			}
+		}
+	}
+}
+
+function save_config() {
+	global $s;
+
+	print_r($s);
+
+	$conf = '';
+	$confchannels = '';
+	if (isset($s['config'])) {
+		foreach ($s['config'] as $k=>$v) {
+			if (strcmp($k,'channel')==0) {
+				foreach ($v as $chanid=>$chansetting) {
+					$confchannels .= 'channel '.$chanid.' = '.$chansetting."\n";
+				}
+			} else {
+				$conf .= $k.' = '.$v."\n";
+			}
+		}
+		$conf .= $confchannels;
+		if (!file_exists(dirname($s['config-file']))) {
+			mkdir(dirname($s['config-file']));
+		}
+		file_put_contents($s['config-file'], $conf);
+	}
+}
+
+function do_configure() {
+	global $s;
+
+	$today = strftime('%Y%m%d');
+
+	$url = $s['epgurl'].'/epgdata/epgdata.'.$today.'.0.json.gz';
+	$gzcontent = retrieve_url($url, 'epgdata', $today.'0', false);
+	if ($gzcontent == false) {
+		dolog(L_ERR,'Error while retrieving '.$url.' : '.curl_error($ch));
+	} else {
+		$json = gzdecode($gzcontent);
+		$epgpartial = json_decode($json, true);
+		foreach ($epgpartial as $chanid=>$chanepg) {
+			if (isset($s['config']['channel'][$chanid])) {
+				$curvalue = $s['config']['channel'][$chanid];
+			} else {
+				$curvalue = 'd';
+			}
+			$resok = false;
+			while (!$resok) {
+				$res = readline('Channel '.$chanid.' [y=yes, n=no, d=detailed], default '.strtolower($curvalue).' :');
+				if (strcmp(trim($res),'')==0) {
+					$res = $curvalue;
+					$s['config']['channel'][$chanid] = strtolower($res);
+					$resok = true;
+				} elseif (in_array(strtolower(substr($res,0,1)), array('y','n','d'))) {
+					$resok = true;
+					$s['config']['channel'][$chanid] = strtolower($res);
+				}
+			}
+		}
+	}
+	save_config();
+	exit(0);
+}
+
+function get_arg_flag($argname, $def = false) {
+	global $argv;
+
+	$result = $def;
+	foreach ($argv as $argid=>$arg) {
+		if (strcmp($arg,'--'.$argname)==0) {
+			$result = true;
+			unset($argv[$argid]);
+		}
+	}
+	return $result;
+}
+
+function get_arg_value($argname, $def, $regex = '/^(.*)$/') {
+	global $argv;
+
+	$result = $def;
+	foreach ($argv as $argid=>$arg) {
+		if (strcmp($arg,'--'.$argname)==0) {
+			$argok = false;
+			if (isset($argv[$argid+1])) {
+				dolog(L_DBG,"Checking value ".$argv[$argid+1]." of argument ".$arg." against ".$regex);
+				if (preg_match($regex,$argv[$argid+1])) {
+					$result = $argv[$argid+1];
+					$argok = true;
+				}
+				unset($argv[$argid+1]);
+			}
+			if ($argok==false) {
+				dolog(L_ERR,"Incorrect value for argument ".$argname);
+				usage();
+			}
+			unset($argv[$argid]);
+		}
+	}
+	return $result;
+}
+
+function myhtmlentities($msg) {
+	//return htmlentities($msg,ENT_COMPAT,'UTF-8');
+	return strtr(strip_tags($msg), array('&'=>'&amp;'));
+}
+
+function usage($exitvalue = 1) {
+	global $argv,$erroroutput;
+
+	if (!isset($erroroutput)) {
+		$erroroutput = fopen('php://stderr', 'w');
+	}
+
+	$usage = '';
+	$usage .= "Usage: ".$argv[0]." [options]\n";
+	$usage .= "\n";
+	$usage .= "  --capabilities          List this grabber's capabilities and exit\n";
+	$usage .= "  --config-file FILE      Use FILE as configuration file\n";
+	$usage .= "  --configure             Do a manual configuration\n";
+	$usage .= "  --days N                Grab for N days\n";
+	$usage .= "  --debuglevel N          Set debugging to level N (1=ERR,2=WAR,3=NFO,4=VBS,5=DBG)\n";
+	$usage .= "  --description           Describe this grabber and exit\n";
+	$usage .= "  --help                  Show this help\n";
+	$usage .= "  --nocacheepg            Do not load main EPG from cache, always refresh\n";
+	$usage .= "                          Details will still be loaded from cache\n";
+	$usage .= "  --offset N              Start with an offset of N days (0=today,1=tomorrow)\n";
+	$usage .= "  --output FILE           Send XML output to FILE in stead of stdout.\n";          
+	$usage .= "  --preferredmethod       Print the preferred method to grab data\n";
+	$usage .= "  --progress              Print progress in percentage\n";
+	$usage .= "  --quiet                 Don\'t print anything to stderr besides errors and\n";
+	$usage .= "                          warnings (implice debuglevel 2)\n";
+	$usage .= "  --sleep N.N             Sleep N.N seconds after a HTTP request returning data\n";
+	$usage .= "  --sleep2 N.N            Sleep N.N seconds after a HTTP request returning\n";
+	$usage .= "                          Not-Modified and data could be loaded from cache\n";
+	$usage .= "  --suffix TEXT           Suffix to use naming the channel IDs\n";
+	$usage .= "  --useragent TEXT        Use TEXT as user agent in the HTTP requests\n";         
+	$usage .= "  --validcache N          If cache is younger than N hours, don\'t do a HTTP\n";
+	$usage .= "                          requesting with If-Modified-Since, always use cache\n";
+	$usage .= "  --verbose               Print more information to stderr (implice debuglevel 3)\n";
+	$usage .= "\n";
+
+	fwrite($erroroutput, $usage);
+
+	fclose($erroroutput);
+	exit($exitvalue);
+}
+
+
+?>
