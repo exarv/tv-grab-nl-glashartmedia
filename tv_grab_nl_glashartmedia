@@ -14,7 +14,7 @@ $s['version'] = '0.6.1';
 $s['appurl'] = 'http://www.exarv.nl/tv_grab_nl_glashartmedia';
 $s['epgurl'] = 'http://w.zt6.nl';
 $s['epgdescription'] = 'Glashart Media TV Guide';
-$s['cachedir'] = dirname($argv[0]).'/cache/';
+$s['cachedir'] = $_SERVER['HOME'].'/.xmltv/'.basename($argv[0]).'/cache/';
 
 define('L_ERR',1);
 define('L_WAR',2);
@@ -219,7 +219,7 @@ function output_epg($epg) {
 		$xml .= '  </channel>'."\n";
 		foreach ($chanepg as $progid=>$proginfo) {
 			if (isset($proginfo['name'])) {
-				$xml .= '  <programme start="'.strftime('%Y%m%d%H%M%S %z',$proginfo['start']).'" end="'.strftime('%Y%m%d%H%M%S %z',$proginfo['end']).'" channel="'.$chanid.'.'.$s['suffix'].'">'."\n";
+				$xml .= '  <programme start="'.strftime('%Y%m%d%H%M%S %z',$proginfo['start']).'" stop="'.strftime('%Y%m%d%H%M%S %z',$proginfo['end']).'" channel="'.$chanid.'.'.$s['suffix'].'">'."\n";
 				$xml .= '    <title lang="nl">'.myhtmlentities($proginfo['name']).'</title>'."\n";
 				if ((isset($proginfo['description'])) && ($proginfo['description']!='')) {
 					$xml .= '    <desc lang="nl">'.myhtmlentities($proginfo['description']).'</desc>'."\n";
@@ -536,30 +536,42 @@ function do_configure() {
 
 	$today = strftime('%Y%m%d');
 
-	$url = $s['epgurl'].'/epgdata/epgdata.'.$today.'.0.json.gz';
-	$gzcontent = retrieve_url($url, 'epgdata', $today.'0', false);
-	if ($gzcontent == false) {
-		dolog(L_ERR,'Error while retrieving '.$url.' : '.curl_error($ch));
-	} else {
-		$json = gzdecode($gzcontent);
-		$epgpartial = json_decode($json, true);
-		foreach ($epgpartial as $chanid=>$chanepg) {
-			if (isset($s['config']['channel'][$chanid])) {
-				$curvalue = $s['config']['channel'][$chanid];
-			} else {
-				$curvalue = 'd';
-			}
-			$resok = false;
-			while (!$resok) {
-				$res = readline('Channel '.$chanid.' [y=yes, n=no, d=detailed], default '.strtolower($curvalue).' :');
-				if (strcmp(trim($res),'')==0) {
-					$res = $curvalue;
-					$s['config']['channel'][$chanid] = strtolower($res);
-					$resok = true;
-				} elseif (in_array(strtolower(substr($res,0,1)), array('y','n','d'))) {
-					$resok = true;
-					$s['config']['channel'][$chanid] = strtolower($res);
+	$channels = array();
+
+	print "Loading 24 hours of epg data to determine all channels";
+	for ($i=0; $i<8; $i++) {
+		$url = $s['epgurl'].'/epgdata/epgdata.'.$today.'.'.$i.'.json.gz';
+		$gzcontent = retrieve_url($url, 'epgdata', $today.$i, false);
+		print ".";
+		if ($gzcontent == false) {
+			dolog(L_ERR,'Error while retrieving '.$url.' : '.curl_error($ch));
+		} else {
+			$json = gzdecode($gzcontent);
+			$epgpartial = json_decode($json, true);
+			foreach ($epgpartial as $chanid=>$chanepg) {
+				if (!isset($channels[$chanid])) {
+					$channels[$chanid] = $chanid;
 				}
+			}
+		}
+	}
+	print "\n";
+	foreach ($channels as $chanid) {
+		if (isset($s['config']['channel'][$chanid])) {
+			$curvalue = $s['config']['channel'][$chanid];
+		} else {
+			$curvalue = 'd';
+		}
+		$resok = false;
+		while (!$resok) {
+			$res = readline('Channel '.$chanid.' [y=yes, n=no, d=detailed], default '.strtolower($curvalue).' :');
+			if (strcmp(trim($res),'')==0) {
+				$res = $curvalue;
+				$s['config']['channel'][$chanid] = strtolower($res);
+				$resok = true;
+			} elseif (in_array(strtolower(substr($res,0,1)), array('y','n','d'))) {
+				$resok = true;
+				$s['config']['channel'][$chanid] = strtolower($res);
 			}
 		}
 	}

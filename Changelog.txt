@@ -1,0 +1,7 @@
+Changelog:
+
+v0.6.2 - 17-May-2012
+ * fixes #4 Changed the end= to stop= (should be stop= according to xmltv specs). Thnx 2 Sander Jongeleen
+ * fixes #2 Changed the location of the cache directory to a place under the .xmltv directory in the homedir of the user. Thnx 2 Robert Tomohamat
+ * fixes #1 Now loading 24 hours of EPG before configuring so all channels with EPG data should be included now.
+
