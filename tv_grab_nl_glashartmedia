@@ -3,14 +3,14 @@
 /* tv_grab_nl_glashartmedia
  *
  * @author Robert Verspuy <robert@exa.nl>
- * @version 0.6.1
+ * @version 0.6.2
  *
  */
 ini_set('date.timezone', 'Europe/Amsterdam');
 ini_set('memory_limit','256M');
 
 $s['appname'] = 'tv_grab_nl_glashartmedia';
-$s['version'] = '0.6.1';
+$s['version'] = '0.6.2';
 $s['appurl'] = 'http://www.exarv.nl/tv_grab_nl_glashartmedia';
 $s['epgurl'] = 'http://w.zt6.nl';
 $s['epgdescription'] = 'Glashart Media TV Guide';
